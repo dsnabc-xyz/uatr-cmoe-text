@@ -10,6 +10,7 @@ from .resnet_se import ResNetSE
 from .tdnn import TDNN
 from .uatr_cmoe_resnet18 import UATRCMoETextResNet18
 from .uatr_cmoe_resnet_ap import UATRCMoETextResNetAP
+from .uatr_cmoe_resnet_ap_top1 import ResNetAPClassifier, UATRCMoETextResNetAPTop1
 
 __all__ = ['build_model']
 

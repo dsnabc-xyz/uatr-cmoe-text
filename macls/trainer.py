@@ -33,7 +33,11 @@ except Exception:
     confusion_matrix = None
 
 
-UATR_CMOE_TEXT_MODELS = {'UATRCMoETextResNet18', 'UATRCMoETextResNetAP'}
+UATR_CMOE_TEXT_MODELS = {
+    'UATRCMoETextResNet18',
+    'UATRCMoETextResNetAP',
+    'UATRCMoETextResNetAPTop1',
+}
 
 
 class MAClsTrainer(object):

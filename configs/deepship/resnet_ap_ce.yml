@@ -1,0 +1,65 @@
+# 数据集参数
+dataset_conf:
+  dataset:
+    min_duration: 0.4
+    max_duration: 30
+    sample_rate: 32000
+    use_dB_normalization: True
+    target_dB: -20
+  dataLoader:
+    batch_size: 64
+    drop_last: True
+    num_workers: 8
+  eval_conf:
+    batch_size: 8
+    max_duration: 30
+  train_list: 'E:\dataset\deepship\demonet_table10_split_30s_overlap15s_sr32000\train.txt'
+  test_list: 'E:\dataset\deepship\demonet_table10_split_30s_overlap15s_sr32000\test.txt'
+  label_list_path: 'E:\dataset\deepship\demonet_table10_split_30s_overlap15s_sr32000\label.txt'
+
+# 数据预处理参数
+preprocess_conf:
+  use_hf_model: False
+  feature_method: 'MelSpectrogram'
+  method_args:
+    sample_rate: 32000
+    frame_length: 50.0
+    frame_shift: 25.0
+    n_fft: 2048
+    n_mels: 300
+    f_min: 20.0
+    f_max: null
+    window_type: 'hanning'
+    power: 2.0
+    center: false
+    log_type: 'log'
+    transpose: true
+
+model_conf:
+  model: 'ResNetAPClassifier'
+  model_args:
+    num_class: null
+    base_channels: 32
+    embd_dim: 256
+    dropout: 0.1
+    attention_heads: 8
+    attention_dropout: 0.1
+    attention_pool_type: 'learnable_query'
+
+optimizer_conf:
+  optimizer: 'AdamW'
+  optimizer_args:
+    lr: 0.001
+    weight_decay: !!float 1e-5
+  scheduler: 'WarmupCosineSchedulerLR'
+  scheduler_args:
+    min_lr: !!float 1e-5
+    max_lr: 0.001
+    warmup_epoch: 5
+
+train_conf:
+  enable_amp: False
+  use_compile: False
+  label_smoothing: 0.0
+  max_epoch: 2
+  log_interval: 10
