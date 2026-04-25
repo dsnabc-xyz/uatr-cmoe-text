@@ -22,6 +22,7 @@ from macls.data_utils.featurizer import AudioFeaturizer
 from macls.data_utils.reader import MAClsDataset
 from macls.metric.metrics import accuracy
 from macls.models import build_model
+from macls.models.cmoe_text_common import EXPECTED_TEXT_CLASS_NAMES, validate_ship_class_names
 from macls.optimizer import build_optimizer, build_lr_scheduler
 from macls.utils.checkpoint import load_pretrained, load_checkpoint, save_checkpoint
 from macls.utils.utils import dict_to_object, plot_confusion_matrix, print_arguments, convert_string_based_on_type
@@ -98,6 +99,8 @@ class MAClsTrainer(object):
         with open(self.configs.dataset_conf.label_list_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
         self.class_labels = [l.replace('\n', '') for l in lines]
+        if self.configs.model_conf.get('model', '') == 'UATRCMoETextResNet18':
+            validate_ship_class_names(self.class_labels, EXPECTED_TEXT_CLASS_NAMES)
         if platform.system().lower() == 'windows':
             self.configs.dataset_conf.dataLoader.num_workers = 0
             logger.warning('Windows系统不支持多线程读取数据，已自动关闭！')
@@ -110,6 +113,11 @@ class MAClsTrainer(object):
         self.eval_loss, self.eval_acc = None, None
         self.test_log_step, self.train_log_step = 0, 0
         self.stop_train, self.stop_eval = False, False
+
+    def _forward_model(self, model, features, labels=None):
+        if labels is not None and self.configs.model_conf.get('model', '') == 'UATRCMoETextResNet18':
+            return model(features, labels=labels)
+        return model(features)
 
     def __setup_dataloader(self, is_train=False):
         """ 获取数据加载器
@@ -227,6 +235,8 @@ class MAClsTrainer(object):
         :param nranks: 所使用显卡的数量
         """
         train_times, accuracies, loss_sum = [], [], []
+        ce_loss_sum, balance_loss_sum, gate_entropy_sum, text_proto_loss_sum = [], [], [], []
+        gate_importance_sum = None
         start = time.time()
         for batch_id, (features, label, input_len) in enumerate(self.train_loader):
             if self.stop_train: break
@@ -238,9 +248,23 @@ class MAClsTrainer(object):
                 label = label.to(self.device).long()
             # 执行模型计算，是否开启自动混合精度
             with torch.autocast('cuda', enabled=self.configs.train_conf.enable_amp):
-                output = self.model(features)
-            # 计算损失值
-            los = self.loss(output, label)
+                output = self._forward_model(self.model, features, labels=label)
+                if isinstance(output, dict):
+                    logits = output["logits"]
+                    los = output["total_loss"]
+                    ce_loss = output.get('ce_loss')
+                    balance_loss = output.get('balance_loss')
+                    text_proto_loss = output.get('text_proto_loss')
+                    gate_entropy = output.get('gate_entropy')
+                    gate_importance = output.get('gate_importance')
+                else:
+                    logits = output
+                    los = self.loss(logits, label)
+                    ce_loss = los
+                    balance_loss = None
+                    text_proto_loss = None
+                    gate_entropy = None
+                    gate_importance = None
             # 是否开启自动混合精度
             if self.configs.train_conf.enable_amp:
                 # loss缩放，乘以系数loss_scaling
@@ -258,9 +282,23 @@ class MAClsTrainer(object):
             self.optimizer.zero_grad()
 
             # 计算准确率
-            acc = accuracy(output, label)
+            acc = accuracy(logits, label)
             accuracies.append(acc)
             loss_sum.append(los.data.cpu().numpy())
+            if ce_loss is not None:
+                ce_loss_sum.append(float(ce_loss.detach().cpu()))
+            if balance_loss is not None:
+                balance_loss_sum.append(float(balance_loss.detach().cpu()))
+            if text_proto_loss is not None:
+                text_proto_loss_sum.append(float(text_proto_loss.detach().cpu()))
+            if gate_entropy is not None:
+                gate_entropy_sum.append(float(gate_entropy.detach().cpu()))
+            if gate_importance is not None:
+                gate_importance_np = gate_importance.detach().cpu().numpy()
+                if gate_importance_sum is None:
+                    gate_importance_sum = gate_importance_np
+                else:
+                    gate_importance_sum += gate_importance_np
             train_times.append((time.time() - start) * 1000)
             self.train_step += 1
 
@@ -275,16 +313,42 @@ class MAClsTrainer(object):
                 eta_str = str(timedelta(seconds=int(self.train_eta_sec)))
                 self.train_loss = sum(loss_sum) / len(loss_sum)
                 self.train_acc = sum(accuracies) / len(accuracies)
+                mean_ce_loss = sum(ce_loss_sum) / len(ce_loss_sum) if ce_loss_sum else 0.0
+                mean_balance_loss = sum(balance_loss_sum) / len(balance_loss_sum) if balance_loss_sum else 0.0
+                mean_gate_entropy = sum(gate_entropy_sum) / len(gate_entropy_sum) if gate_entropy_sum else 0.0
+                mean_text_proto_loss = (
+                    sum(text_proto_loss_sum) / len(text_proto_loss_sum) if text_proto_loss_sum else 0.0
+                )
+                gate_importance_text = 'n/a'
+                if gate_importance_sum is not None and len(loss_sum) > 0:
+                    mean_gate_importance = gate_importance_sum / len(loss_sum)
+                    gate_importance_text = ', '.join(
+                        [f'e{i}={value:.4f}' for i, value in enumerate(mean_gate_importance.tolist())]
+                    )
                 logger.info(f'Train epoch: [{epoch_id}/{self.configs.train_conf.max_epoch}], '
                             f'batch: [{batch_id}/{len(self.train_loader)}], '
-                            f'loss: {self.train_loss:.5f}, accuracy: {self.train_acc:.5f}, '
+                            f'loss_total: {self.train_loss:.5f}, accuracy: {self.train_acc:.5f}, '
+                            f'loss_ce: {mean_ce_loss:.6f}, '
+                            f'loss_balance: {mean_balance_loss:.6f}, '
+                            f'loss_text_proto: {mean_text_proto_loss:.6f}, '
+                            f'gate_entropy: {mean_gate_entropy:.6f}, '
+                            f'gate_importance: [{gate_importance_text}], '
                             f'learning rate: {self.scheduler.get_last_lr()[0]:>.8f}, '
                             f'speed: {train_speed:.2f} data/sec, eta: {eta_str}')
-                writer.add_scalar('Train/Loss', self.train_loss, self.train_log_step)
+                writer.add_scalar('Train/LossTotal', self.train_loss, self.train_log_step)
+                writer.add_scalar('Train/LossCE', mean_ce_loss, self.train_log_step)
                 writer.add_scalar('Train/Accuracy', self.train_acc, self.train_log_step)
+                writer.add_scalar('Train/LossBalance', mean_balance_loss, self.train_log_step)
+                writer.add_scalar('Train/LossTextProto', mean_text_proto_loss, self.train_log_step)
+                writer.add_scalar('Train/GateEntropy', mean_gate_entropy, self.train_log_step)
+                if gate_importance_sum is not None and len(loss_sum) > 0:
+                    for expert_idx, value in enumerate(mean_gate_importance.tolist()):
+                        writer.add_scalar(f'Train/GateImportance/E{expert_idx}', value, self.train_log_step)
                 # 记录学习率
                 writer.add_scalar('Train/lr', self.scheduler.get_last_lr()[0], self.train_log_step)
                 train_times, accuracies, loss_sum = [], [], []
+                ce_loss_sum, balance_loss_sum, gate_entropy_sum, text_proto_loss_sum = [], [], [], []
+                gate_importance_sum = None
                 self.train_log_step += 1
             start = time.time()
             self.scheduler.step()
@@ -404,7 +468,7 @@ class MAClsTrainer(object):
                 if self.stop_eval: break
                 features = features.to(self.device)
                 label = label.to(self.device).long()
-                output = eval_model(features)
+                output = self._forward_model(eval_model, features)
                 los = self.loss(output, label)
                 # 计算准确率
                 acc = accuracy(output, label)

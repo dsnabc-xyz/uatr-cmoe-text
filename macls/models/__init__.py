@@ -8,6 +8,7 @@ from .panns import PANNS_CNN6, PANNS_CNN10, PANNS_CNN14
 from .res2net import Res2Net
 from .resnet_se import ResNetSE
 from .tdnn import TDNN
+from .uatr_cmoe_resnet18 import UATRCMoETextResNet18
 
 __all__ = ['build_model']
 

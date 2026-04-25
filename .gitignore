@@ -6,7 +6,7 @@ macls.egg-info/
 dataset/
 log/
 output/
-models/
+/models/
 pretrained_models/
 feature_models/
 temp/
