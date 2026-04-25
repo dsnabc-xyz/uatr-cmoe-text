@@ -6,6 +6,13 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 
+DEFAULT_RAW_ROOT = "/root/autodl-tmp/DeepShip"
+DEFAULT_OUT_ROOT = "/root/autodl-tmp/deepship_demonet_15s"
+DEFAULT_CLIP_SECONDS = 15.0
+DEFAULT_OVERLAP_RATIO = 0.0
+DEFAULT_MODE = "cut"
+DEFAULT_MIN_CLIP_RATIO = 0.95
+
 TEST_IDS = {
     "Cargo": {
         1, 2, 4, 5, 18, 30, 32, 35, 40, 48, 56, 62,
@@ -58,12 +65,27 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Build DEMONet Table 10 DeepShip train/test split by parent folder ID."
     )
-    parser.add_argument("--raw_root", default="/root/autodl-tmp/DeepShip")
-    parser.add_argument("--out_root", required=True)
-    parser.add_argument("--clip_seconds", type=float, default=30.0)
-    parser.add_argument("--stride_seconds", type=float, default=None)
-    parser.add_argument("--mode", choices=["list_only", "cut"], default="list_only")
-    parser.add_argument("--min_clip_ratio", type=float, default=0.95)
+    parser.add_argument("--raw_root", default=DEFAULT_RAW_ROOT)
+    parser.add_argument("--out_root", default=DEFAULT_OUT_ROOT)
+    parser.add_argument("--clip_seconds", type=float, default=DEFAULT_CLIP_SECONDS)
+    parser.add_argument(
+        "--overlap_ratio",
+        type=float,
+        default=DEFAULT_OVERLAP_RATIO,
+        help=(
+            "Clip overlap ratio. overlap_ratio=0.0 means no overlap; "
+            "overlap_ratio=0.5 means 50%% overlap. If --stride_seconds is also set, "
+            "--stride_seconds takes precedence."
+        ),
+    )
+    parser.add_argument(
+        "--stride_seconds",
+        type=float,
+        default=None,
+        help="Stride between clips in seconds. Takes precedence over --overlap_ratio when provided.",
+    )
+    parser.add_argument("--mode", choices=["list_only", "cut"], default=DEFAULT_MODE)
+    parser.add_argument("--min_clip_ratio", type=float, default=DEFAULT_MIN_CLIP_RATIO)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -367,12 +389,35 @@ def print_summary(records, clip_counts):
             )
 
 
-def main():
-    args = parse_args()
-    if args.stride_seconds is None:
-        args.stride_seconds = args.clip_seconds
+def resolve_timing_args(args):
+    if args.clip_seconds <= 0:
+        raise ValueError("--clip_seconds must be > 0.")
+    if not 0 <= args.overlap_ratio < 1:
+        raise ValueError("--overlap_ratio must satisfy 0 <= overlap_ratio < 1.")
     if not 0 < args.min_clip_ratio <= 1:
         raise ValueError("--min_clip_ratio must be in (0, 1].")
+
+    if args.stride_seconds is None:
+        args.stride_seconds = args.clip_seconds * (1.0 - args.overlap_ratio)
+    if args.stride_seconds <= 0:
+        raise ValueError("--stride_seconds must be > 0.")
+    return args
+
+
+def print_args(args):
+    print("================ Parameters ================")
+    print(f"raw_root: {args.raw_root}")
+    print(f"out_root: {args.out_root}")
+    print(f"mode: {args.mode}")
+    print(f"clip_seconds: {args.clip_seconds}")
+    print(f"stride_seconds: {args.stride_seconds}")
+    print(f"overlap_ratio: {args.overlap_ratio}")
+    print(f"min_clip_ratio: {args.min_clip_ratio}")
+
+
+def main():
+    args = resolve_timing_args(parse_args())
+    print_args(args)
 
     raw_root = Path(args.raw_root)
     out_root = Path(args.out_root)
