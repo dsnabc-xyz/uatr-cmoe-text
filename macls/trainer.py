@@ -9,7 +9,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import yaml
-from sklearn.metrics import confusion_matrix
 from torch.utils.data import DataLoader, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
 from torchinfo import summary
@@ -26,6 +25,15 @@ from macls.models.cmoe_text_common import EXPECTED_TEXT_CLASS_NAMES, validate_sh
 from macls.optimizer import build_optimizer, build_lr_scheduler
 from macls.utils.checkpoint import load_pretrained, load_checkpoint, save_checkpoint
 from macls.utils.utils import dict_to_object, plot_confusion_matrix, print_arguments, convert_string_based_on_type
+
+try:
+    from sklearn.metrics import classification_report, confusion_matrix
+except Exception:
+    classification_report = None
+    confusion_matrix = None
+
+
+UATR_CMOE_TEXT_MODELS = {'UATRCMoETextResNet18', 'UATRCMoETextResNetAP'}
 
 
 class MAClsTrainer(object):
@@ -99,7 +107,7 @@ class MAClsTrainer(object):
         with open(self.configs.dataset_conf.label_list_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
         self.class_labels = [l.replace('\n', '') for l in lines]
-        if self.configs.model_conf.get('model', '') == 'UATRCMoETextResNet18':
+        if self.configs.model_conf.get('model', '') in UATR_CMOE_TEXT_MODELS:
             validate_ship_class_names(self.class_labels, EXPECTED_TEXT_CLASS_NAMES)
         if platform.system().lower() == 'windows':
             self.configs.dataset_conf.dataLoader.num_workers = 0
@@ -111,13 +119,72 @@ class MAClsTrainer(object):
         self.train_loss, self.train_acc = None, None
         self.train_eta_sec = None
         self.eval_loss, self.eval_acc = None, None
+        self.eval_acc_batch_avg, self.eval_acc_micro = None, None
         self.test_log_step, self.train_log_step = 0, 0
         self.stop_train, self.stop_eval = False, False
 
     def _forward_model(self, model, features, labels=None):
-        if labels is not None and self.configs.model_conf.get('model', '') == 'UATRCMoETextResNet18':
+        if labels is not None and self.configs.model_conf.get('model', '') in UATR_CMOE_TEXT_MODELS:
             return model(features, labels=labels)
         return model(features)
+
+    def _compute_confusion_matrix(self, labels, preds):
+        label_ids = list(range(len(self.class_labels)))
+        if confusion_matrix is not None:
+            return confusion_matrix(labels, preds, labels=label_ids)
+        cm = np.zeros((len(label_ids), len(label_ids)), dtype=np.int64)
+        for true_label, pred_label in zip(labels, preds):
+            if 0 <= true_label < len(label_ids) and 0 <= pred_label < len(label_ids):
+                cm[true_label, pred_label] += 1
+        return cm
+
+    @staticmethod
+    def _format_matrix(matrix, row_labels, value_format="{:8d}"):
+        header = " " * 14 + "".join(f"{label[:10]:>10s}" for label in row_labels)
+        lines = [header]
+        for label, row in zip(row_labels, matrix):
+            values = "".join(value_format.format(value) for value in row)
+            lines.append(f"{label[:12]:>12s}  {values}")
+        return "\n".join(lines)
+
+    def _log_eval_report(self, labels, preds):
+        cm = self._compute_confusion_matrix(labels, preds)
+        row_sums = cm.sum(axis=1, keepdims=True)
+        normalized_cm = np.divide(
+            cm.astype(np.float64),
+            row_sums,
+            out=np.zeros_like(cm, dtype=np.float64),
+            where=row_sums != 0,
+        )
+
+        logger.info("Raw confusion matrix:\n{}", self._format_matrix(cm, self.class_labels))
+        logger.info(
+            "Normalized confusion matrix (normalize='true'):\n{}",
+            self._format_matrix(normalized_cm, self.class_labels, value_format="{:10.4f}"),
+        )
+
+        if classification_report is not None:
+            report = classification_report(
+                labels,
+                preds,
+                labels=list(range(len(self.class_labels))),
+                target_names=self.class_labels,
+                digits=4,
+                zero_division=0,
+            )
+            logger.info("Classification report:\n{}", report)
+            return
+
+        recalls = np.divide(
+            np.diag(cm).astype(np.float64),
+            cm.sum(axis=1),
+            out=np.zeros(len(self.class_labels), dtype=np.float64),
+            where=cm.sum(axis=1) != 0,
+        )
+        lines = ["Per-class recall fallback:"]
+        for label, recall, support in zip(self.class_labels, recalls, cm.sum(axis=1)):
+            lines.append(f"{label:>12s}: recall={recall:.4f}, support={int(support)}")
+        logger.info("\n".join(lines))
 
     def __setup_dataloader(self, is_train=False):
         """ 获取数据加载器
@@ -237,6 +304,7 @@ class MAClsTrainer(object):
         train_times, accuracies, loss_sum = [], [], []
         ce_loss_sum, balance_loss_sum, gate_entropy_sum, text_proto_loss_sum = [], [], [], []
         gate_importance_sum = None
+        gate_fraction_sum = None
         start = time.time()
         for batch_id, (features, label, input_len) in enumerate(self.train_loader):
             if self.stop_train: break
@@ -257,6 +325,7 @@ class MAClsTrainer(object):
                     text_proto_loss = output.get('text_proto_loss')
                     gate_entropy = output.get('gate_entropy')
                     gate_importance = output.get('gate_importance')
+                    gate_fraction = output.get('gate_fraction')
                 else:
                     logits = output
                     los = self.loss(logits, label)
@@ -265,6 +334,7 @@ class MAClsTrainer(object):
                     text_proto_loss = None
                     gate_entropy = None
                     gate_importance = None
+                    gate_fraction = None
             # 是否开启自动混合精度
             if self.configs.train_conf.enable_amp:
                 # loss缩放，乘以系数loss_scaling
@@ -299,6 +369,12 @@ class MAClsTrainer(object):
                     gate_importance_sum = gate_importance_np
                 else:
                     gate_importance_sum += gate_importance_np
+            if gate_fraction is not None:
+                gate_fraction_np = gate_fraction.detach().cpu().numpy()
+                if gate_fraction_sum is None:
+                    gate_fraction_sum = gate_fraction_np
+                else:
+                    gate_fraction_sum += gate_fraction_np
             train_times.append((time.time() - start) * 1000)
             self.train_step += 1
 
@@ -325,6 +401,12 @@ class MAClsTrainer(object):
                     gate_importance_text = ', '.join(
                         [f'e{i}={value:.4f}' for i, value in enumerate(mean_gate_importance.tolist())]
                     )
+                gate_fraction_text = 'n/a'
+                if gate_fraction_sum is not None and len(loss_sum) > 0:
+                    mean_gate_fraction = gate_fraction_sum / len(loss_sum)
+                    gate_fraction_text = ', '.join(
+                        [f'e{i}={value:.4f}' for i, value in enumerate(mean_gate_fraction.tolist())]
+                    )
                 logger.info(f'Train epoch: [{epoch_id}/{self.configs.train_conf.max_epoch}], '
                             f'batch: [{batch_id}/{len(self.train_loader)}], '
                             f'loss_total: {self.train_loss:.5f}, accuracy: {self.train_acc:.5f}, '
@@ -333,6 +415,7 @@ class MAClsTrainer(object):
                             f'loss_text_proto: {mean_text_proto_loss:.6f}, '
                             f'gate_entropy: {mean_gate_entropy:.6f}, '
                             f'gate_importance: [{gate_importance_text}], '
+                            f'gate_fraction: [{gate_fraction_text}], '
                             f'learning rate: {self.scheduler.get_last_lr()[0]:>.8f}, '
                             f'speed: {train_speed:.2f} data/sec, eta: {eta_str}')
                 writer.add_scalar('Train/LossTotal', self.train_loss, self.train_log_step)
@@ -344,11 +427,15 @@ class MAClsTrainer(object):
                 if gate_importance_sum is not None and len(loss_sum) > 0:
                     for expert_idx, value in enumerate(mean_gate_importance.tolist()):
                         writer.add_scalar(f'Train/GateImportance/E{expert_idx}', value, self.train_log_step)
+                if gate_fraction_sum is not None and len(loss_sum) > 0:
+                    for expert_idx, value in enumerate(mean_gate_fraction.tolist()):
+                        writer.add_scalar(f'Train/GateFraction/E{expert_idx}', value, self.train_log_step)
                 # 记录学习率
                 writer.add_scalar('Train/lr', self.scheduler.get_last_lr()[0], self.train_log_step)
                 train_times, accuracies, loss_sum = [], [], []
                 ce_loss_sum, balance_loss_sum, gate_entropy_sum, text_proto_loss_sum = [], [], [], []
                 gate_importance_sum = None
+                gate_fraction_sum = None
                 self.train_log_step += 1
             start = time.time()
             self.scheduler.step()
@@ -400,6 +487,7 @@ class MAClsTrainer(object):
 
         self.train_loss, self.train_acc = None, None
         self.eval_loss, self.eval_acc = None, None
+        self.eval_acc_batch_avg, self.eval_acc_micro = None, None
         self.test_log_step, self.train_log_step = 0, 0
         if local_rank == 0:
             writer.add_scalar('Train/lr', self.scheduler.get_last_lr()[0], last_epoch)
@@ -420,10 +508,20 @@ class MAClsTrainer(object):
                 if self.stop_eval: continue
                 logger.info('=' * 70)
                 self.eval_loss, self.eval_acc = self.evaluate()
-                logger.info('Test epoch: {}, time/epoch: {}, loss: {:.5f}, accuracy: {:.5f}'.format(
-                    epoch_id, str(timedelta(seconds=(time.time() - start_epoch))), self.eval_loss, self.eval_acc))
+                logger.info(
+                    'Test epoch: {}, time/epoch: {}, loss: {:.5f}, '
+                    'eval_acc_batch_avg: {:.5f}, eval_acc_micro: {:.5f}'.format(
+                        epoch_id,
+                        str(timedelta(seconds=(time.time() - start_epoch))),
+                        self.eval_loss,
+                        self.eval_acc_batch_avg,
+                        self.eval_acc_micro,
+                    )
+                )
                 logger.info('=' * 70)
                 writer.add_scalar('Test/Accuracy', self.eval_acc, self.test_log_step)
+                writer.add_scalar('Test/AccuracyBatchAvg', self.eval_acc_batch_avg, self.test_log_step)
+                writer.add_scalar('Test/AccuracyMicro', self.eval_acc_micro, self.test_log_step)
                 writer.add_scalar('Test/Loss', self.eval_loss, self.test_log_step)
                 self.test_log_step += 1
                 self.model.train()
@@ -463,6 +561,7 @@ class MAClsTrainer(object):
             eval_model = self.model
 
         accuracies, losses, preds, labels = [], [], [], []
+        total_correct, total_samples = 0, 0
         with torch.no_grad():
             for batch_id, (features, label, input_lens) in enumerate(tqdm(self.test_loader, desc='执行评估')):
                 if self.stop_eval: break
@@ -480,19 +579,26 @@ class MAClsTrainer(object):
                 preds.extend(pred.tolist())
                 # 真实标签
                 labels.extend(label.tolist())
+                total_correct += int(np.sum(pred == label))
+                total_samples += int(len(label))
                 losses.append(los.data.cpu().numpy())
         loss = float(sum(losses) / len(losses)) if len(losses) > 0 else -1
-        acc = float(sum(accuracies) / len(accuracies)) if len(accuracies) > 0 else -1
+        acc_batch_avg = float(sum(accuracies) / len(accuracies)) if len(accuracies) > 0 else -1
+        acc_micro = float(total_correct / total_samples) if total_samples > 0 else -1
+        self.eval_acc_batch_avg = acc_batch_avg
+        self.eval_acc_micro = acc_micro
+        if labels and preds:
+            self._log_eval_report(labels, preds)
         # 保存混合矩阵
         if save_matrix_path is not None:
             try:
-                cm = confusion_matrix(labels, preds)
+                cm = self._compute_confusion_matrix(labels, preds)
                 plot_confusion_matrix(cm=cm, save_path=os.path.join(save_matrix_path, f'{int(time.time())}.png'),
                                       class_labels=self.class_labels)
             except Exception as e:
                 logger.error(f'保存混淆矩阵失败：{e}')
         self.model.train()
-        return loss, acc
+        return loss, acc_micro
 
     def export(self, save_model_path='models/', resume_model='models/EcapaTdnn_Fbank/best_model/'):
         """

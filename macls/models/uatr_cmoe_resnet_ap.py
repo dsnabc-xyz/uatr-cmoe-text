@@ -7,9 +7,7 @@ import torch.nn.functional as F
 from macls.models.cmoe_text_common import (
     build_projection_head,
     compute_proto_logits,
-    gate_entropy,
     load_text_prototypes,
-    uatr_cmoe_balance_loss,
 )
 
 
@@ -260,8 +258,13 @@ class UATRCMoETextResNetAP(nn.Module):
 
         logits = self.classifier(mixed_feat)
 
-        balance_loss, gate_fraction, gate_importance = uatr_cmoe_balance_loss(router_probs)
-        entropy = gate_entropy(router_probs)
+        num_experts = router_probs.size(1)
+        gate_importance = router_probs.mean(dim=0)
+        expert_id = router_probs.argmax(dim=1)
+        expert_mask = F.one_hot(expert_id, num_classes=num_experts).to(dtype=router_probs.dtype)
+        gate_fraction = expert_mask.mean(dim=0)
+        entropy = -(router_probs * torch.log(router_probs.clamp_min(1e-8))).sum(dim=1).mean()
+        balance_loss = num_experts * torch.sum(gate_fraction * gate_importance)
         self.last_balance_loss = balance_loss
         self.last_gate_fraction = gate_fraction.detach()
         self.last_gate_importance = gate_importance.detach()
