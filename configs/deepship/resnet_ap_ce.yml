@@ -1,25 +1,23 @@
-# 数据集参数
 dataset_conf:
   dataset:
     min_duration: 0.4
     max_duration: 30
     sample_rate: 32000
-    use_dB_normalization: True
+    use_dB_normalization: true
     target_dB: -20
   dataLoader:
     batch_size: 64
-    drop_last: True
+    drop_last: true
     num_workers: 8
   eval_conf:
-    batch_size: 8
+    batch_size: 64
     max_duration: 30
-  train_list: 'E:\dataset\deepship\demonet_table10_split_30s_overlap15s_sr32000\train.txt'
-  test_list: 'E:\dataset\deepship\demonet_table10_split_30s_overlap15s_sr32000\test.txt'
-  label_list_path: 'E:\dataset\deepship\demonet_table10_split_30s_overlap15s_sr32000\label.txt'
+  train_list: '/root/autodl-tmp/deepship_demonet_30s_overlap15s/train.txt'
+  test_list: '/root/autodl-tmp/deepship_demonet_30s_overlap15s/test.txt'
+  label_list_path: '/root/autodl-tmp/deepship_demonet_30s_overlap15s/label.txt'
 
-# 数据预处理参数
 preprocess_conf:
-  use_hf_model: False
+  use_hf_model: false
   feature_method: 'MelSpectrogram'
   method_args:
     sample_rate: 32000
@@ -27,8 +25,8 @@ preprocess_conf:
     frame_shift: 25.0
     n_fft: 2048
     n_mels: 300
-    f_min: 20.0
-    f_max: null
+    f_min: 100.0
+    f_max: 8000.0
     window_type: 'hanning'
     power: 2.0
     center: false
@@ -39,27 +37,29 @@ model_conf:
   model: 'ResNetAPClassifier'
   model_args:
     num_class: null
-    base_channels: 32
-    embd_dim: 256
-    dropout: 0.1
+    base_channels: 64
+    embd_dim: 512
+    classifier_hidden_dim: 128
+    classifier_use_bn: false
+    dropout: 0.2
     attention_heads: 8
     attention_dropout: 0.1
-    attention_pool_type: 'learnable_query'
+    attention_pool_type: 'mean_query'
 
 optimizer_conf:
   optimizer: 'AdamW'
   optimizer_args:
-    lr: 0.001
-    weight_decay: !!float 1e-5
+    lr: 0.0002
+    weight_decay: !!float 1e-4
   scheduler: 'WarmupCosineSchedulerLR'
   scheduler_args:
     min_lr: !!float 1e-5
-    max_lr: 0.001
-    warmup_epoch: 5
+    max_lr: 0.0002
+    warmup_epoch: 10
 
 train_conf:
-  enable_amp: False
-  use_compile: False
-  label_smoothing: 0.0
-  max_epoch: 2
+  enable_amp: true
+  use_compile: false
+  label_smoothing: 0.05
+  max_epoch: 200
   log_interval: 10

@@ -287,13 +287,16 @@ class ResNetAPClassifier(nn.Module):
     def __init__(self,
                  num_class,
                  input_size,
-                 base_channels=32,
-                 embd_dim=256,
-                 dropout=0.1,
+                 base_channels=64,
+                 embd_dim=512,
+                 dropout=0.2,
                  attention_heads=8,
                  attention_dropout=0.1,
-                 attention_pool_type="learnable_query"):
+                 attention_pool_type="mean_query",
+                 classifier_use_bn=False,
+                 classifier_hidden_dim=128):
         super().__init__()
+        del embd_dim
         self.backbone = ResNetAPBackbone(
             input_size=input_size,
             base_channels=base_channels,
@@ -301,13 +304,22 @@ class ResNetAPClassifier(nn.Module):
             attention_dropout=attention_dropout,
             attention_pool_type=attention_pool_type,
         )
-        self.classifier = nn.Sequential(
-            nn.Linear(self.backbone.out_channels, embd_dim),
-            nn.BatchNorm1d(embd_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(embd_dim, num_class),
-        )
+        self.attention_pooling = self.backbone.attention_pooling
+
+        if classifier_hidden_dim is None:
+            self.classifier = nn.Linear(self.backbone.out_channels, num_class)
+        else:
+            classifier_layers = [
+                nn.Linear(self.backbone.out_channels, classifier_hidden_dim),
+            ]
+            if classifier_use_bn:
+                classifier_layers.append(nn.BatchNorm1d(classifier_hidden_dim))
+            classifier_layers.extend([
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(classifier_hidden_dim, num_class),
+            ])
+            self.classifier = nn.Sequential(*classifier_layers)
 
     def forward(self, x):
         pooled_feat = self.backbone(x)
