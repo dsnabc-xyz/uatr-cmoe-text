@@ -9,6 +9,7 @@ from .res2net import Res2Net
 from .resnet_se import ResNetSE
 from .tdnn import TDNN
 from .uatr_cmoe_resnet18 import UATRCMoETextResNet18
+from .uatr_cmoe_resnet_ap import UATRCMoETextResNetAP
 
 __all__ = ['build_model']
 
