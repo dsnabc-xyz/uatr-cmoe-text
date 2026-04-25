@@ -132,27 +132,6 @@ class MAClsTrainer(object):
             return model(features, labels=labels)
         return model(features)
 
-    @staticmethod
-    def _set_bn_train_only(model):
-        """
-        整体模型保持 eval，但只让 BatchNorm 层进入 train。
-        作用：
-        - Dropout / Attention Dropout 仍然关闭
-        - BatchNorm 使用当前 batch 的 mean/var
-        """
-        model.eval()
-        bn_types = (
-            torch.nn.BatchNorm1d,
-            torch.nn.BatchNorm2d,
-            torch.nn.BatchNorm3d,
-            torch.nn.SyncBatchNorm,
-        )
-        bn_count = 0
-        for module in model.modules():
-            if isinstance(module, bn_types):
-                module.train()
-                bn_count += 1
-        return bn_count
 
     def _compute_confusion_matrix(self, labels, preds):
         label_ids = list(range(len(self.class_labels)))
@@ -570,12 +549,11 @@ class MAClsTrainer(object):
                                 amp_scaler=self.amp_scaler, save_model_path=save_model_path, epoch_id=epoch_id,
                                 accuracy=self.eval_acc)
 
-    def evaluate(self, resume_model=None, save_matrix_path=None, bn_train_only=False):
+    def evaluate(self, resume_model=None, save_matrix_path=None):
         """
         评估模型
         :param resume_model: 所使用的模型
         :param save_matrix_path: 保存混合矩阵的路径
-        :param bn_train_only: 整体eval但只让BatchNorm层进入train，用于诊断BN running stats
         :return: 评估结果
         """
         if self.test_loader is None:
@@ -589,11 +567,7 @@ class MAClsTrainer(object):
             model_state_dict = torch.load(resume_model, weights_only=False)
             self.model.load_state_dict(model_state_dict)
             logger.info(f'成功加载模型：{resume_model}')
-        if bn_train_only:
-            bn_count = self._set_bn_train_only(self.model)
-            logger.info(f'BN诊断评估：model.eval() + only BatchNorm.train(), BN层数量={bn_count}')
-        else:
-            self.model.eval()
+        self.model.eval()
         if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
             eval_model = self.model.module
         else:
