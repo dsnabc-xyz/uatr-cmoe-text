@@ -19,7 +19,7 @@ class AudioFeaturizer(nn.Module):
 
     def __init__(self, feature_method='MelSpectrogram', use_hf_model=False, method_args={}):
         super().__init__()
-        self._method_args = method_args
+        self._method_args = dict(method_args or {})
         self._feature_method = feature_method
         self.use_hf_model = use_hf_model
         if self.use_hf_model:
@@ -39,13 +39,14 @@ class AudioFeaturizer(nn.Module):
                 self.output_channels = outputs.extract_features.shape[2]
         else:
             if feature_method == 'MelSpectrogram':
-                self.feat_fun = MelSpectrogram(**method_args)
+                self.feat_fun = CompatibleMelSpectrogram(**self._method_args)
+                self._method_args = self.feat_fun.resolved_args
             elif feature_method == 'Spectrogram':
-                self.feat_fun = Spectrogram(**method_args)
+                self.feat_fun = Spectrogram(**self._method_args)
             elif feature_method == 'MFCC':
-                self.feat_fun = MFCC(**method_args)
+                self.feat_fun = MFCC(**self._method_args)
             elif feature_method == 'Fbank':
-                self.feat_fun = KaldiFbank(**method_args)
+                self.feat_fun = KaldiFbank(**self._method_args)
             else:
                 raise Exception(f'预处理方法 {self._feature_method} 不存在!')
             logger.info(f'使用【{feature_method}】提取特征')
@@ -74,7 +75,8 @@ class AudioFeaturizer(nn.Module):
         else:
             # 使用普通方法提取音频特征
             feature = self.feat_fun(waveforms)
-            feature = feature.transpose(2, 1)
+            if self._feature_method != 'MelSpectrogram':
+                feature = feature.transpose(2, 1)
         # 归一化
         feature = feature - feature.mean(1, keepdim=True)
         if input_lens_ratio is not None:
@@ -109,6 +111,90 @@ class AudioFeaturizer(nn.Module):
             return self._method_args.get('num_mel_bins', 23)
         else:
             raise Exception('没有{}预处理方法'.format(self._feature_method))
+
+
+class CompatibleMelSpectrogram(nn.Module):
+    def __init__(self, **method_args):
+        super().__init__()
+        args = dict(method_args or {})
+
+        self.log_type = args.pop('log_type', None)
+        self.transpose = bool(args.pop('transpose', True))
+
+        frame_length = args.pop('frame_length', None)
+        frame_shift = args.pop('frame_shift', None)
+        window_type = args.pop('window_type', None)
+
+        sample_rate = args.get('sample_rate', None)
+        if sample_rate is None and (frame_length is not None or frame_shift is not None):
+            raise ValueError("sample_rate is required when using frame_length or frame_shift.")
+        if sample_rate is not None:
+            sample_rate = int(sample_rate)
+            args['sample_rate'] = sample_rate
+
+        if frame_length is not None and args.get('win_length', None) is None:
+            args['win_length'] = int(round(sample_rate * float(frame_length) / 1000.0))
+        if frame_shift is not None and args.get('hop_length', None) is None:
+            args['hop_length'] = int(round(sample_rate * float(frame_shift) / 1000.0))
+
+        if window_type is not None:
+            window_type = str(window_type).lower()
+            if window_type in {'hann', 'hanning'}:
+                args['window_fn'] = torch.hann_window
+            elif window_type == 'hamming':
+                args['window_fn'] = torch.hamming_window
+            else:
+                raise ValueError("window_type must be one of: hann, hanning, hamming.")
+
+        win_length = args.get('win_length', None)
+        n_fft = args.get('n_fft', None)
+        if win_length is not None:
+            win_length = int(win_length)
+            args['win_length'] = win_length
+            if n_fft is None:
+                args['n_fft'] = win_length
+            elif int(n_fft) < win_length:
+                raise ValueError("n_fft must be >= win_length.")
+
+        self.mel = MelSpectrogram(**args)
+
+        resolved = dict(args)
+        resolved['log_type'] = self.log_type
+        resolved['transpose'] = self.transpose
+        self.resolved_args = resolved
+        self._log_config()
+
+    def _log_config(self):
+        logger.info(
+            "[MelSpectrogram] "
+            f"sample_rate={self.resolved_args.get('sample_rate')}, "
+            f"n_fft={self.resolved_args.get('n_fft')}, "
+            f"win_length={self.resolved_args.get('win_length')}, "
+            f"hop_length={self.resolved_args.get('hop_length')}, "
+            f"n_mels={self.resolved_args.get('n_mels')}, "
+            f"f_min={self.resolved_args.get('f_min')}, "
+            f"f_max={self.resolved_args.get('f_max')}, "
+            f"center={self.resolved_args.get('center')}, "
+            f"power={self.resolved_args.get('power')}, "
+            f"log_type={self.log_type}, "
+            f"transpose={self.transpose}"
+        )
+
+    def forward(self, waveforms):
+        mel = self.mel(waveforms)
+        log_type = None if self.log_type is None else str(self.log_type).lower()
+        if log_type in {'log', 'ln'}:
+            mel = torch.log(mel.clamp_min(1e-10))
+        elif log_type == 'log10':
+            mel = torch.log10(mel.clamp_min(1e-10))
+        elif log_type in {None, 'none', 'false'}:
+            pass
+        else:
+            raise ValueError("log_type must be one of: log, ln, log10, none, false.")
+
+        if self.transpose:
+            mel = mel.transpose(-1, -2)
+        return mel
 
 
 class KaldiFbank(nn.Module):
