@@ -101,6 +101,61 @@ class AttentionPooling2D(nn.Module):
         return pooled
 
 
+class PaperMultiHeadAttentionPooling2D(nn.Module):
+    def __init__(self, embed_dim, attention_heads=8, attention_dropout=0.1,
+                 readout="avgmax"):
+        super().__init__()
+        if embed_dim % attention_heads != 0:
+            raise ValueError("embed_dim must be divisible by attention_heads")
+        if readout not in {"avg", "avgmax", "flatten"}:
+            raise ValueError("readout must be one of: 'avg', 'avgmax', 'flatten'")
+
+        self.embed_dim = int(embed_dim)
+        self.readout = readout
+        self.in_norm = nn.LayerNorm(embed_dim)
+        self.attn = nn.MultiheadAttention(
+            embed_dim=embed_dim,
+            num_heads=attention_heads,
+            dropout=attention_dropout,
+            batch_first=True,
+        )
+        self.dropout = nn.Dropout(attention_dropout)
+        self.out_norm = nn.LayerNorm(embed_dim)
+        self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.max_pool = nn.AdaptiveMaxPool2d((1, 1))
+        if readout == "avg":
+            self.out_dim = embed_dim
+        elif readout == "avgmax":
+            self.out_dim = embed_dim * 2
+        else:
+            self.out_dim = None
+        self.last_output_shape = None
+        self.last_token_shape = None
+        self.last_feature_map_shape = None
+
+    def forward(self, feature_map):
+        bsz, channels, height, width = feature_map.shape
+        self.last_feature_map_shape = tuple(feature_map.shape)
+        tokens = feature_map.flatten(2).transpose(1, 2)
+        tokens = self.in_norm(tokens)
+        attn_out, _ = self.attn(tokens, tokens, tokens, need_weights=False)
+        tokens = tokens + self.dropout(attn_out)
+        tokens = self.out_norm(tokens)
+        self.last_token_shape = tuple(tokens.shape)
+
+        tokens_2d = tokens.transpose(1, 2).reshape(bsz, channels, height, width)
+        if self.readout == "avg":
+            pooled = self.avg_pool(tokens_2d).flatten(1)
+        elif self.readout == "avgmax":
+            avg_pooled = self.avg_pool(tokens_2d).flatten(1)
+            max_pooled = self.max_pool(tokens_2d).flatten(1)
+            pooled = torch.cat([avg_pooled, max_pooled], dim=1)
+        else:
+            pooled = tokens_2d.flatten(1)
+        self.last_output_shape = tuple(pooled.shape)
+        return pooled
+
+
 class UATRCMoETextResNetAP(nn.Module):
     def __init__(self,
                  num_class,

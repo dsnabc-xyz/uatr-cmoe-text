@@ -296,7 +296,6 @@ class ResNetAPClassifier(nn.Module):
                  classifier_use_bn=False,
                  classifier_hidden_dim=128):
         super().__init__()
-        del embd_dim
         self.backbone = ResNetAPBackbone(
             input_size=input_size,
             base_channels=base_channels,
