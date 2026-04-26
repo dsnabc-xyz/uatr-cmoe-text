@@ -23,12 +23,12 @@ preprocess_conf:
     sample_rate: 32000
     frame_length: 50.0
     frame_shift: 25.0
-    n_fft: 2048
+    n_fft: 4096
     n_mels: 300
     f_min: 100.0
     f_max: 8000.0
     window_type: 'hanning'
-    power: 2.0
+    power: 1.0
     center: false
     log_type: 'log'
     transpose: true
@@ -39,27 +39,27 @@ model_conf:
     num_class: null
     base_channels: 64
     embd_dim: 512
-    classifier_hidden_dim: 128
+    classifier_hidden_dim: null
     classifier_use_bn: false
-    dropout: 0.2
+    dropout: 0.0
     attention_heads: 8
     attention_dropout: 0.1
-    attention_pool_type: 'mean_query'
+    attention_pool_type: 'learnable_query'
 
 optimizer_conf:
   optimizer: 'AdamW'
   optimizer_args:
-    lr: 0.0002
-    weight_decay: !!float 1e-4
+    lr: !!float 5e-4          
+    weight_decay: !!float 1e-5 
   scheduler: 'WarmupCosineSchedulerLR'
   scheduler_args:
-    min_lr: !!float 1e-5
-    max_lr: 0.0002
-    warmup_epoch: 10
+    min_lr: !!float 1e-6
+    max_lr: !!float 5e-4
+    warmup_epoch: 5
 
 train_conf:
   enable_amp: true
   use_compile: false
-  label_smoothing: 0.05
-  max_epoch: 200
+  label_smoothing: 0.0
+  max_epoch: 100
   log_interval: 10
