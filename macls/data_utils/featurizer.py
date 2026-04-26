@@ -20,12 +20,15 @@ class AudioFeaturizer(nn.Module):
     def __init__(self, feature_method='MelSpectrogram', use_hf_model=False, method_args={}):
         super().__init__()
         self._method_args = dict(method_args or {})
+        subtract_time_mean = self._method_args.pop('subtract_time_mean', False)
+        self.subtract_time_mean = bool(subtract_time_mean)
         self._feature_method = feature_method
         self.use_hf_model = use_hf_model
+        logger.info(f'[AudioFeaturizer] subtract_time_mean={self.subtract_time_mean}')
         if self.use_hf_model:
             from transformers import AutoModel, AutoFeatureExtractor
             # 判断是否使用GPU提取特征
-            use_gpu = torch.cuda.is_available() and method_args.get('use_gpu', True)
+            use_gpu = torch.cuda.is_available() and self._method_args.get('use_gpu', True)
             self.device = torch.device("cuda") if use_gpu else torch.device("cpu")
             # 加载Wav2Vec2类似模型
             self.processor = AutoFeatureExtractor.from_pretrained(feature_method)
@@ -39,7 +42,10 @@ class AudioFeaturizer(nn.Module):
                 self.output_channels = outputs.extract_features.shape[2]
         else:
             if feature_method == 'MelSpectrogram':
-                self.feat_fun = CompatibleMelSpectrogram(**self._method_args)
+                self.feat_fun = CompatibleMelSpectrogram(
+                    subtract_time_mean=self.subtract_time_mean,
+                    **self._method_args,
+                )
                 self._method_args = self.feat_fun.resolved_args
             elif feature_method == 'Spectrogram':
                 self.feat_fun = Spectrogram(**self._method_args)
@@ -77,8 +83,9 @@ class AudioFeaturizer(nn.Module):
             feature = self.feat_fun(waveforms)
             if self._feature_method != 'MelSpectrogram':
                 feature = feature.transpose(2, 1)
-        # 归一化
-        feature = feature - feature.mean(1, keepdim=True)
+        # 可选的时间维均值中心化。论文式Mel配置默认不启用。
+        if self.subtract_time_mean:
+            feature = feature - feature.mean(1, keepdim=True)
         if input_lens_ratio is not None:
             # 对掩码比例进行扩展
             input_lens = (input_lens_ratio * feature.shape[1])
@@ -102,7 +109,7 @@ class AudioFeaturizer(nn.Module):
         if self.use_hf_model:
             return self.output_channels
         if self._feature_method == 'MelSpectrogram':
-            return self._method_args.get('n_mels', 128)
+            return self._method_args.get('n_mels', 300)
         elif self._feature_method == 'Spectrogram':
             return self._method_args.get('n_fft', 400) // 2 + 1
         elif self._feature_method == 'MFCC':
@@ -114,12 +121,16 @@ class AudioFeaturizer(nn.Module):
 
 
 class CompatibleMelSpectrogram(nn.Module):
-    def __init__(self, **method_args):
+    def __init__(self, subtract_time_mean=False, **method_args):
         super().__init__()
         args = dict(method_args or {})
 
-        self.log_type = args.pop('log_type', None)
+        self.subtract_time_mean = bool(subtract_time_mean)
+        self.log_type = args.pop('log_type', 'log')
         self.transpose = bool(args.pop('transpose', True))
+        args.setdefault('power', 1.0)
+        args.setdefault('center', False)
+        args.setdefault('n_mels', 300)
 
         frame_length = args.pop('frame_length', None)
         frame_shift = args.pop('frame_shift', None)
@@ -161,6 +172,7 @@ class CompatibleMelSpectrogram(nn.Module):
         resolved = dict(args)
         resolved['log_type'] = self.log_type
         resolved['transpose'] = self.transpose
+        resolved['subtract_time_mean'] = self.subtract_time_mean
         self.resolved_args = resolved
         self._log_config()
 
@@ -177,7 +189,8 @@ class CompatibleMelSpectrogram(nn.Module):
             f"center={self.resolved_args.get('center')}, "
             f"power={self.resolved_args.get('power')}, "
             f"log_type={self.log_type}, "
-            f"transpose={self.transpose}"
+            f"transpose={self.transpose}, "
+            f"subtract_time_mean={self.subtract_time_mean}"
         )
 
     def forward(self, waveforms):
