@@ -32,6 +32,7 @@ preprocess_conf:
     center: false
     log_type: 'log'
     transpose: true
+    subtract_time_mean: false
 
 model_conf:
   model: 'ResNetAPClassifier'
@@ -45,12 +46,14 @@ model_conf:
     attention_heads: 8
     attention_dropout: 0.1
     attention_pool_type: 'learnable_query'
+    pooling_mode: 'paper_mha'
+    paper_mha_readout: 'avg'
 
 optimizer_conf:
   optimizer: 'AdamW'
   optimizer_args:
-    lr: !!float 5e-4          
-    weight_decay: !!float 1e-5 
+    lr: !!float 5e-4
+    weight_decay: !!float 1e-5
   scheduler: 'WarmupCosineSchedulerLR'
   scheduler_args:
     min_lr: !!float 1e-6
