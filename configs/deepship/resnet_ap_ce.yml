@@ -3,7 +3,7 @@ dataset_conf:
     min_duration: 0.4
     max_duration: 30
     sample_rate: 32000
-    use_dB_normalization: true
+    use_dB_normalization: false
     target_dB: -20
   dataLoader:
     batch_size: 64
@@ -54,11 +54,7 @@ optimizer_conf:
   optimizer_args:
     lr: !!float 5e-4
     weight_decay: !!float 1e-5
-  scheduler: 'WarmupCosineSchedulerLR'
-  scheduler_args:
-    min_lr: !!float 1e-6
-    max_lr: !!float 5e-4
-    warmup_epoch: 5
+  scheduler: {}
 
 train_conf:
   enable_amp: true
