@@ -84,7 +84,8 @@ def load_checkpoint(configs, model, optimizer, amp_scaler, scheduler,
             accuracy = json_data['accuracy']
         logger.info('成功恢复模型参数和优化方法参数：{}'.format(model_path))
         optimizer.step()
-        [scheduler.step() for _ in range(last_epoch * step_epoch)]
+        if scheduler is not None:
+            [scheduler.step() for _ in range(last_epoch * step_epoch)]
         return last_epoch, accuracy
 
     # 获取最后一个保存的模型

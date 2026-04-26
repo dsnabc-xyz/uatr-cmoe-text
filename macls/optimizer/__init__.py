@@ -19,13 +19,17 @@ def build_optimizer(params, configs):
 
 def build_lr_scheduler(optimizer, step_per_epoch, configs):
     use_scheduler = configs.optimizer_conf.get('scheduler', 'WarmupCosineSchedulerLR')
-    scheduler_args = configs.optimizer_conf.get('scheduler_args', {})
-    if configs.optimizer_conf.scheduler == 'CosineAnnealingLR' and 'T_max' not in scheduler_args:
-        scheduler_args.T_max = int(configs.train_conf.max_epoch * 1.2) * step_per_epoch
-    if configs.optimizer_conf.scheduler == 'WarmupCosineSchedulerLR' and 'fix_epoch' not in scheduler_args:
-        scheduler_args.fix_epoch = configs.train_conf.max_epoch
-    if configs.optimizer_conf.scheduler == 'WarmupCosineSchedulerLR' and 'step_per_epoch' not in scheduler_args:
-        scheduler_args.step_per_epoch = step_per_epoch
+    if use_scheduler is None or str(use_scheduler).strip().lower() in {'none', 'null', ''}:
+        logger.info('未使用学习率衰减策略')
+        return None
+
+    scheduler_args = configs.optimizer_conf.get('scheduler_args', {}) or {}
+    if use_scheduler == 'CosineAnnealingLR' and 'T_max' not in scheduler_args:
+        scheduler_args['T_max'] = int(configs.train_conf.max_epoch * 1.2) * step_per_epoch
+    if use_scheduler == 'WarmupCosineSchedulerLR' and 'fix_epoch' not in scheduler_args:
+        scheduler_args['fix_epoch'] = configs.train_conf.max_epoch
+    if use_scheduler == 'WarmupCosineSchedulerLR' and 'step_per_epoch' not in scheduler_args:
+        scheduler_args['step_per_epoch'] = step_per_epoch
     optim = importlib.import_module(__name__)
     scheduler = getattr(optim, use_scheduler)(optimizer=optimizer, **scheduler_args)
     logger.info(f'成功创建学习率衰减：{use_scheduler}，参数为：{scheduler_args}')

@@ -132,6 +132,12 @@ class MAClsTrainer(object):
             return model(features, labels=labels)
         return model(features)
 
+    def _current_learning_rate(self):
+        if self.scheduler is not None:
+            return self.scheduler.get_last_lr()[0]
+        if self.optimizer is not None and len(self.optimizer.param_groups) > 0:
+            return self.optimizer.param_groups[0].get('lr', 0.0)
+        return 0.0
 
     def _compute_confusion_matrix(self, labels, preds):
         label_ids = list(range(len(self.class_labels)))
@@ -420,6 +426,7 @@ class MAClsTrainer(object):
                     gate_fraction_text = ', '.join(
                         [f'e{i}={value:.4f}' for i, value in enumerate(mean_gate_fraction.tolist())]
                     )
+                current_lr = self._current_learning_rate()
                 logger.info(f'Train epoch: [{epoch_id}/{self.configs.train_conf.max_epoch}], '
                             f'batch: [{batch_id}/{len(self.train_loader)}], '
                             f'loss_total: {self.train_loss:.5f}, accuracy: {self.train_acc:.5f}, '
@@ -429,7 +436,7 @@ class MAClsTrainer(object):
                             f'gate_entropy: {mean_gate_entropy:.6f}, '
                             f'gate_importance: [{gate_importance_text}], '
                             f'gate_fraction: [{gate_fraction_text}], '
-                            f'learning rate: {self.scheduler.get_last_lr()[0]:>.8f}, '
+                            f'learning rate: {current_lr:>.8f}, '
                             f'speed: {train_speed:.2f} data/sec, eta: {eta_str}')
                 writer.add_scalar('Train/LossTotal', self.train_loss, self.train_log_step)
                 writer.add_scalar('Train/LossCE', mean_ce_loss, self.train_log_step)
@@ -444,14 +451,15 @@ class MAClsTrainer(object):
                     for expert_idx, value in enumerate(mean_gate_fraction.tolist()):
                         writer.add_scalar(f'Train/GateFraction/E{expert_idx}', value, self.train_log_step)
                 # 记录学习率
-                writer.add_scalar('Train/lr', self.scheduler.get_last_lr()[0], self.train_log_step)
+                writer.add_scalar('Train/lr', current_lr, self.train_log_step)
                 train_times, accuracies, loss_sum = [], [], []
                 ce_loss_sum, balance_loss_sum, gate_entropy_sum, text_proto_loss_sum = [], [], [], []
                 gate_importance_sum = None
                 gate_fraction_sum = None
                 self.train_log_step += 1
             start = time.time()
-            self.scheduler.step()
+            if self.scheduler is not None:
+                self.scheduler.step()
 
     def train(self,
               save_model_path='models/',
@@ -503,7 +511,7 @@ class MAClsTrainer(object):
         self.eval_acc_batch_avg, self.eval_acc_micro = None, None
         self.test_log_step, self.train_log_step = 0, 0
         if local_rank == 0:
-            writer.add_scalar('Train/lr', self.scheduler.get_last_lr()[0], last_epoch)
+            writer.add_scalar('Train/lr', self._current_learning_rate(), last_epoch)
         if max_epoch is not None:
             self.configs.train_conf.max_epoch = max_epoch
         # 最大步数
