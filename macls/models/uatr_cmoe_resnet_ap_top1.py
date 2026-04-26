@@ -9,7 +9,11 @@ from macls.models.cmoe_text_common import (
     compute_proto_logits,
     load_text_prototypes,
 )
-from macls.models.uatr_cmoe_resnet_ap import AttentionPooling2D, BasicBlock
+from macls.models.uatr_cmoe_resnet_ap import (
+    AttentionPooling2D,
+    PaperMultiHeadAttentionPooling2D,
+    BasicBlock,
+)
 
 
 class Top1LogitExpert(nn.Module):
@@ -28,10 +32,17 @@ class Top1LogitExpert(nn.Module):
 
 
 class ResNetAPBackbone(nn.Module):
-    def __init__(self, input_size, base_channels=32, attention_heads=8,
-                 attention_dropout=0.1, attention_pool_type="learnable_query"):
+    def __init__(self,
+                 input_size,
+                 base_channels=32,
+                 attention_heads=8,
+                 attention_dropout=0.1,
+                 attention_pool_type="learnable_query",
+                 pooling_mode="query_pool",
+                 paper_mha_readout="avgmax"):
         super().__init__()
         self.input_size = int(input_size)
+        self.pooling_mode = pooling_mode
         self.stem = nn.Sequential(
             nn.Conv2d(1, base_channels, kernel_size=7, stride=2, padding=3, bias=False),
             nn.BatchNorm2d(base_channels),
@@ -44,12 +55,42 @@ class ResNetAPBackbone(nn.Module):
         self.layer3 = self._make_layer(base_channels * 4, blocks=2, stride=2)
         self.layer4 = self._make_layer(base_channels * 8, blocks=2, stride=2)
         self.out_channels = base_channels * 8
-        self.attention_pooling = AttentionPooling2D(
-            embed_dim=self.out_channels,
-            attention_heads=attention_heads,
-            attention_dropout=attention_dropout,
-            attention_pool_type=attention_pool_type,
-        )
+        self.last_feature_map_shape = None
+        self.last_pooled_shape = None
+
+        if pooling_mode == "query_pool":
+            self.attention_pooling = AttentionPooling2D(
+                embed_dim=self.out_channels,
+                attention_heads=attention_heads,
+                attention_dropout=attention_dropout,
+                attention_pool_type=attention_pool_type,
+            )
+            self.out_dim = self.out_channels
+        elif pooling_mode == "paper_mha":
+            self.attention_pooling = PaperMultiHeadAttentionPooling2D(
+                embed_dim=self.out_channels,
+                attention_heads=attention_heads,
+                attention_dropout=attention_dropout,
+                readout=paper_mha_readout,
+            )
+            if self.attention_pooling.out_dim is None:
+                raise ValueError(
+                    "paper_mha_readout='flatten' is not supported in ResNetAPBackbone because output dim depends "
+                    "on feature-map size. Use 'avg' or 'avgmax'."
+                )
+            self.out_dim = self.attention_pooling.out_dim
+        elif pooling_mode == "avgpool":
+            self.attention_pooling = nn.AdaptiveAvgPool2d((1, 1))
+            self.out_dim = self.out_channels
+        elif pooling_mode == "avgmaxpool":
+            self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+            self.max_pool = nn.AdaptiveMaxPool2d((1, 1))
+            self.attention_pooling = None
+            self.out_dim = self.out_channels * 2
+        else:
+            raise ValueError(
+                "pooling_mode must be one of: 'query_pool', 'paper_mha', 'avgpool', 'avgmaxpool'"
+            )
 
     def _make_layer(self, out_channels, blocks, stride):
         downsample = None
@@ -81,7 +122,23 @@ class ResNetAPBackbone(nn.Module):
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
-        return self.attention_pooling(x)
+        self.last_feature_map_shape = tuple(x.shape)
+
+        if self.pooling_mode == "query_pool":
+            pooled = self.attention_pooling(x)
+        elif self.pooling_mode == "paper_mha":
+            pooled = self.attention_pooling(x)
+        elif self.pooling_mode == "avgpool":
+            pooled = self.attention_pooling(x).flatten(1)
+        elif self.pooling_mode == "avgmaxpool":
+            avg_pooled = self.avg_pool(x).flatten(1)
+            max_pooled = self.max_pool(x).flatten(1)
+            pooled = torch.cat([avg_pooled, max_pooled], dim=1)
+        else:
+            raise RuntimeError(f"Unsupported pooling_mode: {self.pooling_mode}")
+
+        self.last_pooled_shape = tuple(pooled.shape)
+        return pooled
 
 
 class UATRCMoETextResNetAPTop1(nn.Module):
@@ -104,6 +161,8 @@ class UATRCMoETextResNetAPTop1(nn.Module):
                  attention_heads=8,
                  attention_dropout=0.1,
                  attention_pool_type="learnable_query",
+                 pooling_mode="query_pool",
+                 paper_mha_readout="avgmax",
                  logit_scale_min=0.01,
                  logit_scale_max=100.0):
         super().__init__()
@@ -128,9 +187,11 @@ class UATRCMoETextResNetAPTop1(nn.Module):
             attention_heads=attention_heads,
             attention_dropout=attention_dropout,
             attention_pool_type=attention_pool_type,
+            pooling_mode=pooling_mode,
+            paper_mha_readout=paper_mha_readout,
         )
         self.attention_pooling = self.backbone.attention_pooling
-        self.pre_moe_proj = nn.Linear(self.backbone.out_channels, embd_dim)
+        self.pre_moe_proj = nn.Linear(self.backbone.out_dim, embd_dim)
         self.router = nn.Linear(embd_dim, num_experts)
         self.gate = self.router
         self.experts = nn.ModuleList([
@@ -254,7 +315,7 @@ class UATRCMoETextResNetAPTop1(nn.Module):
             "text_z": text_z,
             "logit_scale": logit_scale.detach(),
             "expert_id": expert_id.detach(),
-            "attention_pooled_shape": self.attention_pooling.last_output_shape,
+            "attention_pooled_shape": self.backbone.last_pooled_shape,
         }
         if return_aux:
             return logits, output
@@ -293,6 +354,8 @@ class ResNetAPClassifier(nn.Module):
                  attention_heads=8,
                  attention_dropout=0.1,
                  attention_pool_type="mean_query",
+                 pooling_mode="query_pool",
+                 paper_mha_readout="avgmax",
                  classifier_use_bn=False,
                  classifier_hidden_dim=128):
         super().__init__()
@@ -302,14 +365,16 @@ class ResNetAPClassifier(nn.Module):
             attention_heads=attention_heads,
             attention_dropout=attention_dropout,
             attention_pool_type=attention_pool_type,
+            pooling_mode=pooling_mode,
+            paper_mha_readout=paper_mha_readout,
         )
         self.attention_pooling = self.backbone.attention_pooling
 
         if classifier_hidden_dim is None:
-            self.classifier = nn.Linear(self.backbone.out_channels, num_class)
+            self.classifier = nn.Linear(self.backbone.out_dim, num_class)
         else:
             classifier_layers = [
-                nn.Linear(self.backbone.out_channels, classifier_hidden_dim),
+                nn.Linear(self.backbone.out_dim, classifier_hidden_dim),
             ]
             if classifier_use_bn:
                 classifier_layers.append(nn.BatchNorm1d(classifier_hidden_dim))
